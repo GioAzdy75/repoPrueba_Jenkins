@@ -1,0 +1,75 @@
+pipeline {
+  agent any
+  options { timestamps(); ansiColor('xterm') }
+
+  environment {
+    # Tags locales para poder “volver” si hiciera falta
+    IMAGE_NAME = "gym-app"
+    IMAGE_TAG  = "build-${env.BUILD_NUMBER}"
+  }
+
+  stages {
+    stage('Checkout') {
+      steps { checkout scm }
+    }
+
+    stage('Compose Up (build & run)') {
+      environment {
+        MP_ACCESS = credentials('mp_access_token')
+        MP_PUBLIC = credentials('mp_public_key')
+        NGROK     = credentials('ngrok_url')   // si no lo usás, podés quitar esta línea
+      }
+      steps {
+        sh '''
+          set -e
+
+          # Generar .env para docker compose
+          cat > .env <<EOF
+MERCADOPAGO_ACCESS_TOKEN=${MP_ACCESS}
+MERCADOPAGO_PUBLIC_KEY=${MP_PUBLIC}
+NGROK_URL=${NGROK}
+EOF
+
+          # (Re)levantar stack: mysql + app (la app se compila dentro del build)
+          docker compose down || true
+          docker compose up -d --build
+
+          docker compose ps
+        '''
+      }
+    }
+
+    stage('Healthcheck app') {
+      steps {
+        sh '''
+          # Ajustá si tu app expone /actuator/health
+          for i in {1..20}; do
+            if curl -fsS http://localhost:9000/actuator/health >/dev/null 2>&1; then
+              echo "App OK"
+              exit 0
+            fi
+            echo "Esperando app... ($i)"
+            sleep 3
+          done
+          echo "Healthcheck FALLÓ"
+          docker compose logs app || true
+          exit 1
+        '''
+      }
+    }
+  }
+
+  post {
+    success {
+      echo "✅ Despliegue OK"
+    }
+    failure {
+      echo "❌ Falló el despliegue"
+    }
+    always {
+      // Guardá logs útiles de la app y MySQL
+      sh 'docker compose logs --no-color > compose.logs || true'
+      archiveArtifacts artifacts: 'compose.logs', allowEmptyArchive: true
+    }
+  }
+}
